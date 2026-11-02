@@ -2,6 +2,16 @@
 
 Yosys maps an eight-bit writable register; OpenROAD replaces its flip-flops with scan cells and stitches one chain. The measured baseline passed 514 checks and the inserted netlist passed 3,330 checks across all 256 byte values. A disconnected internal scan link failed the same observer with a nonzero exit. The serial tail reuses `q[0]`; the measured head-to-tail bit order is 1, 2, 3, 5, 7, 6, 4, 0.
 
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [What runs](#what-runs)
+- [Repository layout](#repository-layout)
+- [Individual stages](#individual-stages)
+- [Results and controls](#results-and-controls)
+- [Troubleshooting](#troubleshooting)
+- [Reports and limits](#reports-and-limits)
+- [Licence](#licence)
+
 The implementation and whitepaper were locally verified on 27 October 2026. **Crucible is beta.** These are bounded engineering demonstrations, with the exclusions below.
 
 ## Included files
@@ -10,138 +20,120 @@ The implementation and whitepaper were locally verified on 27 October 2026. **Cr
 
 The reviewed [PDF](docs/DFT_Eight_Bit_Scan_Insertion_Ignytion_A4.pdf) and [editable A4 PowerPoint](docs/DFT_Eight_Bit_Scan_Insertion_Ignytion_A4.pptx) are included. [Compact evidence](evidence/summary.json) records measured outcomes; [document hashes](evidence/documents.sha256.json) bind the final copies. Generated build artifacts and raw logs remain local and are excluded from Git.
 
-## Prerequisites
+## Quick start
 
-Use Linux x86-64 or the tested Windows/WSL route, with an existing Crucible beta installation, Bash and Python 3. `crucible.lock` pins the managed tool versions and artifact identities. It does not install the external dependencies described here or establish support for native Windows/macOS/ARM hosts.
+Open a Linux/WSL terminal in this repository root. Crucible is beta. A complete, matching SKY130A high-density digital PDK is required: technology/cell LEF, TT 25 C/1.8 V Liberty, functional cell Verilog and primitives. The default PDK root is $HOME/.ciel/sky130A; a Make PDKPATH value overrides it. No extra observer Python packages are required.
 
-Provide a complete SKY130A high-density digital PDK at `$HOME/.ciel/sky130A`, or export `PDKPATH` to its location. Required views are technology LEF, cell LEF, TT 25 C/1.8 V Liberty, functional Verilog and primitives. The runner preprocesses the official Verilog aggregate and extracts only the used module bodies and dependencies unchanged, because the tested aggregate contains an unrelated malformed module. PDK payloads are not vendored. No Python dependencies beyond the standard library are required for engineering verification.
-
-## 1. Choose the correct shell and directory
-
-Run every Linux command below from this repository's root: the directory containing `crucible.toml`, `crucible.lock` and `scripts/`. The tested flow uses **WSL/Linux x86-64**. A Windows PowerShell block is labelled separately. Do not paste a PowerShell block into Bash or run a Bash block in PowerShell.
-
-Crucible must already be installed in that Linux/WSL shell. A PDK, Tcl-capable Magic where required, and native runtime libraries are separate prerequisites; this repository does not provide an installation archive for them. Commands containing `/path/to/...` require your actual dependency location before execution.
-
-## 2. Restore and inspect the Crucible environment
-
-Linux/WSL Bash:
-
-```bash
+```sh
 igny init
-igny --version
 igny workspace sync
-igny status
-igny env show dft-scan
-igny tool show yosys --env dft-scan
-igny tool show openroad --env dft-scan
-igny tool show iverilog --env dft-scan
+igny tool install make --version 4.4.1 --env dft-scan
+igny run --env dft-scan make setup
+igny run --env dft-scan make check
 ```
 
-`igny init` initializes the outer workbench shell. `workspace sync` reads the supplied lock, acquires missing pinned artifacts and restores the recorded environment. It may download large archives; it does not build this design, provision a PDK, or install every native library. `status` should identify this workspace, and `env show` should list the tools in `dft-scan`. `tool show` establishes the binary/provider resolution before a run.
+The runner selects unchanged used official functional-model modules after preprocessing the PDK aggregate. It does not edit the PDK or replace missing models with handwritten cell behaviour.
 
-Stop on an acquisition/binding error and inspect its reported log. A successful version or inventory command is a prerequisite check, not a design PASS. The commands below select the same project environment explicitly through the scripts.
+Run the complete experiment after satisfying those prerequisites:
 
-## 3. Configure and check the PDK
-
-Linux/WSL Bash. Replace the example path only if the PDK is outside the default Ciel location:
-
-```bash
-export PDKPATH="$HOME/.ciel/sky130A"
-# Alternative, after replacing this example with your actual path:
-# export PDKPATH='/path/to/sky130A'
-test -f "$PDKPATH/libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd.tlef"
-test -f "$PDKPATH/libs.ref/sky130_fd_sc_hd/lef/sky130_fd_sc_hd.lef"
-test -f "$PDKPATH/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib"
-test -f "$PDKPATH/libs.ref/sky130_fd_sc_hd/verilog/sky130_fd_sc_hd.v"
-test -f "$PDKPATH/libs.ref/sky130_fd_sc_hd/verilog/primitives.v"
-python3 --version
-igny run --env dft-scan yosys -V
-igny run --env dft-scan iverilog -V
+```sh
+igny run --env dft-scan make run PDKPATH=/path/to/sky130A
 ```
 
-The engineering scripts require only Python's standard library. The runner uses the supplied LEF/Liberty/Verilog views without editing the PDK. It copies the technology LEF under a distinct build basename to avoid a library-name collision.
+Every executable example in this guide goes through Igny. Make delegates to the supplied stage scripts and observers; failed stages stop the workflow. Make 4.4.1 is installed separately from the existing engineering-tool lock. The setup target only checks Python standard-library availability. The check target checks observer imports; it does not qualify a PDK or native-library installation.
 
-## 4. Build the scan design and run every test
+## How it works
 
-Linux/WSL Bash:
+OpenROAD replaces eight flip-flops with scan cells and stitches one chain. Connectivity determines the actual serial order. The same independent bench checks all byte values in the functional baseline and inserted netlist, then must detect a disconnected internal scan link.
 
-```bash
-bash scripts/run.sh build
-bash scripts/run.sh test
-python3 scripts/verify.py
+```mermaid
+flowchart LR
+    R[Eight-bit writable register] --> Y[Yosys mapped register]
+    Y --> O[OpenROAD scan replacement and stitching]
+    O --> C[Derive actual SCD/Q chain order]
+    C --> T[Independent shift / capture simulation]
+    O --> B[Disconnected-link scratch netlist]
+    B --> T
+    T --> V[Observer requires positive checks and causal rejection]
 ```
 
-`build` checks matching LEF/Liberty cells, maps the functional register, invokes actual OpenROAD scan replacement/stitching, reconstructs SCD/Q order, and creates the disconnected-link scratch netlist. `test` preprocesses the unchanged used PDK functional models, compiles the baseline/inserted/disconnected designs, runs the positive tests and requires a nonzero disconnected-link exit.
+## What runs
 
-## 5. Read the results and negative control
-
-Linux/WSL Bash:
-
-```bash
-cat reports/baseline.log
-cat reports/inserted.log
-cat reports/disconnected_exit.txt
-cat reports/disconnected.log
-cat reports/chain.json
-cat reports/summary.json
-tail -n 30 reports/insertion.log
-```
-
-The baseline must report `DFT_BASELINE_PASS patterns=256 checks=514`; the inserted run must report `DFT_SCAN_CAPTURE_PASS patterns=256 checks=3330`. The deliberately disconnected internal SCD link must produce `Q_MISMATCH pattern=1`, expected 01 and observed 00, with exit 1. The final observer must print `DFT_INSERTION_FUNCTIONAL_SCAN_AND_NEGATIVE_CONTROL_VERIFIED`.
-
-The chain has eight scan cells and reuses q[0] as its tail. The actual measured head-to-tail q-bit order is 1, 2, 3, 5, 7, 6, 4, 0. `build/inserted.def` and `build/inserted.odb` are placed insertion-stage outputs; they are not routed timing results.
-
-## 6. Troubleshooting
-
-| Symptom | Check and next action |
+| Component | Pinned version |
 |---|---|
-| Binary not bound | Inspect step 2's `tool show` and lock restoration; use the project environment |
-| LEF/Liberty cell mismatch | Inspect `reports/library.json` and supply compatible views from one complete PDK |
-| Aggregate PDK Verilog cannot parse | Inspect `build/preprocessed_cells.v` and `reports/simulation_models.json`; the runner selects unchanged used modules rather than inventing models |
-| Negative run exits zero | Treat it as a failed guard; inspect `build/disconnected.v` and the same testbench before claiming a pass |
-| Missing `chain.vh` or build netlist | Run `build` before `test` |
+| iverilog | 14.0.0 |
+| openroad | 26Q3-771-g7cfb2105c9 |
+| yosys | 0.63.0 |
 
-## 7. Open the whitepaper and check the public Git candidate
+The lock restores those engineering tools; the setup target prepares only project-local observer dependencies where needed. Initial acquisition may require network access. Native Windows/macOS/ARM tool execution and independent clean-machine reproduction are not established by these results.
 
-Windows PowerShell, from the repository root:
+## Repository layout
 
-```powershell
-Invoke-Item .\docs\DFT_Eight_Bit_Scan_Insertion_Ignytion_A4.pdf
-Invoke-Item .\docs\DFT_Eight_Bit_Scan_Insertion_Ignytion_A4.pptx
-python --version
-python scripts\preflight_git.py
+```text
+.
+|-- Makefile             Managed workflow entry points
+|-- crucible.toml        Workspace selection
+|-- crucible.lock        Engineering-tool identities
+|-- rtl/                 Functional register
+|-- tests/               Independent baseline, scan and capture bench
+|-- scripts/             Insertion, connectivity extraction, official model selection and observers
+|-- docs/                Reviewed PDF and editable PowerPoint
+|-- evidence/            Compact reviewed measurement snapshots
+`-- build/               Generated local artifacts; ignored by Git
 ```
 
-The preflight script uses Python's standard library, so `python scripts/preflight_git.py` also works in an existing Python environment. It checks documentation links, the exact document hashes, indexed/unignored paths, shell index modes, selected credential/personal-path patterns and Git whitespace. This is a public-candidate check; it does not rerun EDA tools.
+## Individual stages
 
-Linux/WSL Git review, after reviewing the files selected by the repository allowlist:
+Run these from the same prepared workspace. Stages use earlier outputs; execute them in the listed order when reproducing the flow manually. The run target performs the full ordered workflow.
 
-```bash
-git status --short
-git diff --check
-git add -- .
-git diff --cached --check
-python3 scripts/preflight_git.py
-git diff --cached --stat
-git diff --cached
+| Managed command | Work performed |
+|---|---|
+| `igny run --env dft-scan make build` | Map the real register, insert scan, derive chain order and prepare a disconnected-link fixture |
+| `igny run --env dft-scan make test` | Simulate the baseline, inserted chain and negative fixture |
+
+Inspect or recheck existing results without rebuilding:
+
+```sh
+igny run --env dft-scan make smoke
+igny run --env dft-scan make report
+igny run --env dft-scan make help
 ```
 
-Do not force-add ignored build products, PDK/runtime payloads, raw logs, local configuration or agent/work notes. The repository contains no invented project-wide licence grant; upstream dependencies retain their own terms.
+The smoke target validates existing generated evidence. It is not a new experiment run. The report target prints local summaries and fails if required results are absent. The sed target normalises only public shell inputs to LF; run invokes it automatically.
 
-The following are **manual commit/publication commands**, not steps already performed by this project. Review the staged content and choose your own author identity and public destination first. Run `remote add` only when this repository has no `origin`:
+## Results and controls
 
-```bash
-git branch --show-current
-git config user.name
-git config user.email
-git commit -m "Add verified DFT_Scan demonstration and whitepaper"
-PUBLIC_REPOSITORY_URL='REPLACE_WITH_YOUR_PUBLIC_REPOSITORY_URL'
-git remote add origin "$PUBLIC_REPOSITORY_URL"
-git push -u origin HEAD
+Require DFT_BASELINE_PASS patterns=256 checks=514, DFT_SCAN_CAPTURE_PASS patterns=256 checks=3330, and DFT_INSERTION_FUNCTIONAL_SCAN_AND_NEGATIVE_CONTROL_VERIFIED. The disconnected link must produce Q_MISMATCH pattern=1 with nonzero exit. The measured head-to-tail q-bit order is 1, 2, 3, 5, 7, 6, 4, 0; q[0] is the tail.
+
+Expected negative failures are handled by the existing runners/observers. Missing tools, compilation failures, timeouts and missing artifacts do not count as successful controls. Changing sources or inputs requires rerunning the affected stages and their dependents. Raw logs and generated runtime/PDK payloads remain local.
+
+## Troubleshooting
+
+| Symptom | Check / next action |
+|---|---|
+| Wrong workspace or missing tool | Open the terminal in the root containing crucible.toml; use the explicit project environment in this guide and restore the lock. |
+| Make is not bound | Repeat the managed Make installation in Quick start. |
+| Observer dependency is absent or changed | Repeat the managed setup target; retain the pinned requirements. |
+| Native library or PDK is missing | Supply the prerequisites described above. Lock restoration and observer setup do not provision them. |
+| Evidence is missing or stale | Run the full workflow or the affected stages in order. Preserve the reported failure instead of editing expected values. |
+| Negative control unexpectedly passes | Treat the guard as failed and inspect its artifacts. |
+
+## Reports and limits
+
+Read the [technical report](docs/DFT_Eight_Bit_Scan_Insertion_Ignytion_A4.pdf) or its [editable PowerPoint](docs/DFT_Eight_Bit_Scan_Insertion_Ignytion_A4.pptx). The documents record measured results and exclusions; source commands in this README are the current managed workflow.
+
+One synchronous register, one clock and zero-delay official cell models. Insertion-stage DEF/OpenDB does not establish routing or timing closure. No ATPG coverage percentage, power-aware test, manufactured-device or signoff claim.
+
+Review the source/document package locally with:
+
+```sh
+igny run --env dft-scan make preflight
 ```
 
-Replace the destination placeholder before use. A new package is staged on `demo/verified`; the branch command confirms the actual current branch. If `origin` already exists, inspect it with `git remote get-url origin` and skip `remote add`. No commit, remote mutation or push is performed by the reproduction scripts.
+This checks the public candidate and document hashes; it does not publish anything or rerun engineering verification.
 
-## Limits
+## Licence
 
-One clock, one synchronous-reset register and functional zero-delay cell models. No ATPG fault-coverage percentage, routed timing closure, power-aware test, manufactured device or signoff claim. DEF/OpenDB are placed insertion-stage outputs.
+Dependencies retain their upstream licences and credit. This checkout has no project-wide licence grant; the owner must select the intended project licence before presenting it as an open-source release. No upstream endorsement is implied.
+
+Source repository: [CRUCIBLE-WORKBENCH/DFT_Scan](https://github.com/CRUCIBLE-WORKBENCH/DFT_Scan).
